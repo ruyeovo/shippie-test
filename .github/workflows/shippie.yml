@@ -20,3 +20,5 @@ jobs:
         uses: mattzcarey/shippie@v0.20.0
         with:
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
