@@ -17,6 +17,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Shippie Review
-        uses: mattzcarey/shippie@v0.21.0
+        uses: mattzcarey/shippie@v0.20.0
         with:
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}
