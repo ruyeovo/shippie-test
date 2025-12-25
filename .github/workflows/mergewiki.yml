@@ -15,12 +15,12 @@ concurrency:
 
 jobs:
   mergewiki:
-    # fork PR 默认拿不到 secrets（OPENROUTER_API_KEY）；先跳过更稳
+    # fork PR 拿不到 secrets（OPENROUTER_API_KEY），先跳过
     if: ${{ github.event.pull_request.draft == false && github.event.pull_request.head.repo.fork == false }}
     runs-on: ubuntu-latest
 
     steps:
-      # 1) Checkout 业务仓库的 base commit（可信环境）
+      # 1) Checkout 业务仓库 base commit（可信环境）
       - name: Checkout base repo (trusted)
         uses: actions/checkout@v4
         with:
@@ -32,12 +32,12 @@ jobs:
         run: |
           git fetch --no-tags origin ${{ github.event.pull_request.head.sha }}:pr_head
 
-      # 3) Checkout 工具仓库（public，无需 token）
-      - name: Checkout MergeWiki tool repo
-        uses: actions/checkout@v4
-        with:
-          repository: ruyoevo/MergeWiki
-          path: tools/mergewiki
+      # 3) Clone 工具仓库（public，无需 token；避免 actions/checkout 的默认分支 API 404）
+      - name: Clone MergeWiki tool repo (public)
+        run: |
+          rm -rf tools/mergewiki
+          mkdir -p tools
+          git clone --depth 1 https://github.com/ruyoevo/MergeWiki.git tools/mergewiki
 
       # 4) Setup Python
       - name: Setup Python
@@ -78,8 +78,6 @@ jobs:
           script: |
             const fs = require('fs');
             const body = fs.readFileSync('comment.md', 'utf8');
-
-            // 必须与你工具渲染器中的 marker 一致
             const marker = '<!-- llm-merge-resolver -->';
 
             const { owner, repo } = context.repo;
@@ -93,17 +91,9 @@ jobs:
             const existing = comments.find(c => c.body && c.body.includes(marker));
 
             if (existing) {
-              await github.rest.issues.updateComment({
-                owner, repo,
-                comment_id: existing.id,
-                body
-              });
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
             } else {
-              await github.rest.issues.createComment({
-                owner, repo,
-                issue_number,
-                body
-              });
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
 
       # 9) Upload artifacts for debugging
