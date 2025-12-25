@@ -15,10 +15,12 @@ concurrency:
 
 jobs:
   mergewiki:
+    # fork PR 默认拿不到 secrets（OPENROUTER_API_KEY），先跳过避免失败刷屏
     if: ${{ github.event.pull_request.draft == false && github.event.pull_request.head.repo.fork == false }}
     runs-on: ubuntu-latest
 
     steps:
+      # 1) Checkout 业务仓库 base commit（可信环境）
       - name: Checkout base repo (trusted)
         uses: actions/checkout@v4
         with:
@@ -26,37 +28,55 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # 2) Fetch PR head 到本地分支 pr_head（用于 merge-base/diff）
       - name: Fetch PR head
         run: |
           git fetch --no-tags origin ${{ github.event.pull_request.head.sha }}:pr_head
 
-      # 关键：public repo 用无鉴权 clone + 禁止交互 + 清掉可能残留的 github extraheader
-      - name: Clone MergeWiki tool repo (public)
+      # 3) 下载工具仓库（public）tarball 并解压到 tools/mergewiki
+      #    说明：完全绕开 git clone，避免任何 git credential / url rewrite 导致的 Username prompt
+      - name: Download MergeWiki tool repo (public tarball)
         env:
           GIT_TERMINAL_PROMPT: "0"
         run: |
+          set -euo pipefail
           rm -rf tools/mergewiki
-          mkdir -p tools
+          mkdir -p tools/mergewiki
 
-          # 防止上一步 checkout 残留 github extraheader 干扰后续 clone
-          git config --global --unset-all http.https://github.com/.extraheader || true
-          git config --global --unset-all credential.helper || true
+          # 你的工具仓库默认分支是 main（你截图里显示 main）
+          TOOL_URL="https://github.com/ruyoevo/MergeWiki/archive/refs/heads/main.tar.gz"
 
-          # 注意这里必须是 MergeWiki（W 大写）
-          git clone --depth 1 https://github.com/ruyoevo/MergeWiki.git tools/mergewiki
+          echo "Downloading: ${TOOL_URL}"
+          curl -L --fail --retry 3 --retry-delay 2 -o /tmp/mergewiki.tar.gz "${TOOL_URL}"
+
+          rm -rf /tmp/MergeWiki-main
+          tar -xzf /tmp/mergewiki.tar.gz -C /tmp
+
+          # 解压后目录一般是 MergeWiki-main
+          cp -R /tmp/MergeWiki-main/* tools/mergewiki/
+
+          echo "Tool repo contents:"
           ls -la tools/mergewiki
 
+          # 关键文件存在性检查（尽早失败，避免后面报莫名其妙错误）
+          test -f tools/mergewiki/requirements.txt
+          test -f tools/mergewiki/main.py
+          test -f tools/mergewiki/render_pr_comment.py
+
+      # 4) Setup Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
+      # 5) Install dependencies
       - name: Install tool dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r tools/mergewiki/requirements.txt
 
+      # 6) Run resolver (MR mode) -> output/result.json
       - name: Run MergeWiki resolver
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -68,18 +88,22 @@ jobs:
             --base-url "https://openrouter.ai/api/v1" \
             -o output
 
+      # 7) Render PR comment markdown -> comment.md
       - name: Render PR comment
         run: |
           python tools/mergewiki/render_pr_comment.py output/result.json \
             -o comment.md \
             --max-blocks 12
 
+      # 8) Create or update PR comment (idempotent via marker)
       - name: Post or update PR comment
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             const body = fs.readFileSync('comment.md', 'utf8');
+
+            // 必须与你渲染器中的 marker 一致
             const marker = '<!-- llm-merge-resolver -->';
 
             const { owner, repo } = context.repo;
@@ -98,6 +122,7 @@ jobs:
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
 
+      # 9) Upload artifacts
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
