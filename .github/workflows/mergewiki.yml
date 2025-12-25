@@ -15,12 +15,11 @@ concurrency:
 
 jobs:
   mergewiki:
-    # fork PR 默认拿不到 secrets（OPENROUTER_API_KEY），先跳过避免失败刷屏
+    # fork PR 默认拿不到 OPENROUTER_API_KEY，先跳过避免失败刷屏
     if: ${{ github.event.pull_request.draft == false && github.event.pull_request.head.repo.fork == false }}
     runs-on: ubuntu-latest
 
     steps:
-      # 1) Checkout 业务仓库 base commit（可信环境）
       - name: Checkout base repo (trusted)
         uses: actions/checkout@v4
         with:
@@ -28,12 +27,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # 2) Fetch PR head 到本地分支 pr_head
       - name: Fetch PR head
         run: |
           git fetch --no-tags origin ${{ github.event.pull_request.head.sha }}:pr_head
 
-      # 3) 下载工具仓库（public）：匿名 API 查 default_branch（不带 token）+ codeload tarball 下载
+      # 关键：不使用 GITHUB_TOKEN 去访问另一个仓库 API（会 404）
+      # 关键：不使用 git clone（你环境会触发 Username prompt）
+      # 这里采用：匿名 API 尝试读取 default_branch；失败就 fallback main/master；
+      # 然后用 codeload 下载 tarball（不走 git）
       - name: Download MergeWiki tool repo (public, no auth)
         run: |
           set -euo pipefail
@@ -44,7 +45,6 @@ jobs:
           rm -rf tools/mergewiki
           mkdir -p tools/mergewiki
 
-          # ---- (A) 匿名查询 default_branch（不带 Authorization，避免 GITHUB_TOKEN 跨仓库 404）----
           echo "Query default branch (anonymous GitHub API)..."
           API_URL="https://api.github.com/repos/${OWNER}/${REPO}"
 
@@ -62,16 +62,14 @@ PY
 )"
           fi
 
-          # fallback：如果 API 不可用/被限流/返回异常，就尝试 main/master
           if [ -z "${DEFAULT_BRANCH}" ]; then
-            echo "WARN: failed to fetch default_branch via API, fallback to main/master"
+            echo "WARN: cannot get default_branch via API; fallback to main/master"
             CANDIDATE_BRANCHES=("main" "master")
           else
             echo "Default branch: ${DEFAULT_BRANCH}"
             CANDIDATE_BRANCHES=("${DEFAULT_BRANCH}" "main" "master")
           fi
 
-          # ---- (B) 从 codeload 下载 tarball（不走 git clone）----
           FOUND=0
           for br in "${CANDIDATE_BRANCHES[@]}"; do
             url="https://codeload.github.com/${OWNER}/${REPO}/tar.gz/refs/heads/${br}"
@@ -84,87 +82,9 @@ PY
           done
 
           if [ "${FOUND}" -ne 1 ]; then
-            echo "ERROR: cannot download tool tarball from any candidate branches."
+            echo "ERROR: cannot download tool tarball."
             echo "Checked branches: ${CANDIDATE_BRANCHES[*]}"
             exit 1
           fi
 
-          rm -rf /tmp/mergewiki_src
-          mkdir -p /tmp/mergewiki_src
-          tar -xzf /tmp/mergewiki.tar.gz -C /tmp/mergewiki_src --strip-components=1
-          cp -R /tmp/mergewiki_src/* tools/mergewiki/
-
-          echo "Tool repo contents:"
-          ls -la tools/mergewiki
-
-          # 关键文件存在性检查（尽早失败）
-          test -f tools/mergewiki/requirements.txt
-          test -f tools/mergewiki/main.py
-          test -f tools/mergewiki/render_pr_comment.py
-
-      # 4) Setup Python
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      # 5) Install dependencies
-      - name: Install tool dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r tools/mergewiki/requirements.txt
-
-      # 6) Run resolver (MR mode) -> output/result.json
-      - name: Run MergeWiki resolver
-        env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: |
-          python tools/mergewiki/main.py \
-            --repo . \
-            --branchA pr_head \
-            --branchB ${{ github.event.pull_request.base.sha }} \
-            --base-url "https://openrouter.ai/api/v1" \
-            -o output
-
-      # 7) Render PR comment markdown -> comment.md
-      - name: Render PR comment
-        run: |
-          python tools/mergewiki/render_pr_comment.py output/result.json \
-            -o comment.md \
-            --max-blocks 12
-
-      # 8) Create or update PR comment (idempotent via marker)
-      - name: Post or update PR comment
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const body = fs.readFileSync('comment.md', 'utf8');
-            const marker = '<!-- llm-merge-resolver -->';
-
-            const { owner, repo } = context.repo;
-            const issue_number = context.payload.pull_request.number;
-
-            const comments = await github.paginate(
-              github.rest.issues.listComments,
-              { owner, repo, issue_number, per_page: 100 }
-            );
-
-            const existing = comments.find(c => c.body && c.body.includes(marker));
-
-            if (existing) {
-              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
-            } else {
-              await github.rest.issues.createComment({ owner, repo, issue_number, body });
-            }
-
-      # 9) Upload artifacts
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: mergewiki-output
-          path: |
-            output/
-            comment.md
-          if-no-files-found: error
+          rm -rf /tmp/mergewiki_src_
