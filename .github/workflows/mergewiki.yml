@@ -1,4 +1,4 @@
-name: LLM Merge Conflict Resolver
+name: MergeWiki (LLM Conflict Resolver)
 
 on:
   pull_request:
@@ -10,59 +10,76 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: llm-merge-resolver-${{ github.event.pull_request.number }}
+  group: mergewiki-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  resolve:
-    # fork PR 默认拿不到 secrets；先跳过（更安全、避免无意义失败）
+  mergewiki:
+    # fork PR 默认拿不到 secrets（OPENROUTER_API_KEY）；先跳过更稳
     if: ${{ github.event.pull_request.draft == false && github.event.pull_request.head.repo.fork == false }}
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout base (trusted)
+      # 1) Checkout 业务仓库的 base commit（可信环境）
+      - name: Checkout base repo (trusted)
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
 
+      # 2) Fetch PR head 到本地分支 pr_head
       - name: Fetch PR head
         run: |
           git fetch --no-tags origin ${{ github.event.pull_request.head.sha }}:pr_head
 
+      # 3) Checkout 工具仓库（public，无需 token）
+      - name: Checkout MergeWiki tool repo
+        uses: actions/checkout@v4
+        with:
+          repository: ruyoevo/MergeWiki
+          path: tools/mergewiki
+
+      # 4) Setup Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install dependencies
+      # 5) Install tool dependencies
+      - name: Install tool dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r tools/mergewiki/requirements.txt
 
-      - name: Run resolver (MR mode)
+      # 6) Run resolver (MR mode) -> output/result.json
+      - name: Run MergeWiki resolver
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
-          python main.py \
+          python tools/mergewiki/main.py \
             --repo . \
             --branchA pr_head \
             --branchB ${{ github.event.pull_request.base.sha }} \
-            --api-key "$OPENROUTER_API_KEY" \
             --base-url "https://openrouter.ai/api/v1" \
             -o output
 
-      - name: Render PR comment markdown
+      # 7) Render PR comment markdown -> comment.md
+      - name: Render PR comment
         run: |
-          python render_pr_comment.py output/result.json -o comment.md --max-blocks 12
+          python tools/mergewiki/render_pr_comment.py output/result.json \
+            -o comment.md \
+            --max-blocks 12
 
-      - name: Create or update PR comment
+      # 8) Create or update PR comment (idempotent via marker)
+      - name: Post or update PR comment
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             const body = fs.readFileSync('comment.md', 'utf8');
+
+            // 必须与你工具渲染器中的 marker 一致
             const marker = '<!-- llm-merge-resolver -->';
 
             const { owner, repo } = context.repo;
@@ -89,9 +106,12 @@ jobs:
               });
             }
 
-      - name: Upload output artifact
+      # 9) Upload artifacts for debugging
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: llm-merge-resolver-output
-          path: output/
+          name: mergewiki-output
+          path: |
+            output/
+            comment.md
           if-no-files-found: error
