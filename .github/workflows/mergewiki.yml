@@ -33,32 +33,47 @@ jobs:
         run: |
           git fetch --no-tags origin ${{ github.event.pull_request.head.sha }}:pr_head
 
-      # 3) 下载工具仓库（public）tarball 并解压到 tools/mergewiki
-      #    说明：完全绕开 git clone，避免任何 git credential / url rewrite 导致的 Username prompt
-      - name: Download MergeWiki tool repo (public tarball)
+      # 3) 下载工具仓库：GitHub API 查询 default_branch + tarball 下载并解压
+      - name: Download MergeWiki tool repo (via GitHub API tarball)
         env:
-          GIT_TERMINAL_PROMPT: "0"
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+
+          OWNER="ruyoevo"
+          REPO="MergeWiki"
+
           rm -rf tools/mergewiki
           mkdir -p tools/mergewiki
 
-          # 你的工具仓库默认分支是 main（你截图里显示 main）
-          TOOL_URL="https://github.com/ruyoevo/MergeWiki/archive/refs/heads/main.tar.gz"
+          echo "Query default branch via GitHub API..."
+          DEFAULT_BRANCH="$(curl -sSfL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${OWNER}/${REPO}" | jq -r '.default_branch')"
 
-          echo "Downloading: ${TOOL_URL}"
-          curl -L --fail --retry 3 --retry-delay 2 -o /tmp/mergewiki.tar.gz "${TOOL_URL}"
+          if [ -z "${DEFAULT_BRANCH}" ] || [ "${DEFAULT_BRANCH}" = "null" ]; then
+            echo "ERROR: failed to get default_branch"
+            exit 1
+          fi
 
-          rm -rf /tmp/MergeWiki-main
-          tar -xzf /tmp/mergewiki.tar.gz -C /tmp
+          echo "Default branch: ${DEFAULT_BRANCH}"
+          echo "Downloading tarball via API..."
+          curl -L --fail --retry 3 --retry-delay 2 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -o /tmp/mergewiki.tar.gz \
+            "https://api.github.com/repos/${OWNER}/${REPO}/tarball/${DEFAULT_BRANCH}"
 
-          # 解压后目录一般是 MergeWiki-main
-          cp -R /tmp/MergeWiki-main/* tools/mergewiki/
+          rm -rf /tmp/mergewiki_src
+          mkdir -p /tmp/mergewiki_src
+          tar -xzf /tmp/mergewiki.tar.gz -C /tmp/mergewiki_src --strip-components=1
+          cp -R /tmp/mergewiki_src/* tools/mergewiki/
 
           echo "Tool repo contents:"
           ls -la tools/mergewiki
 
-          # 关键文件存在性检查（尽早失败，避免后面报莫名其妙错误）
+          # 关键文件存在性检查（尽早失败）
           test -f tools/mergewiki/requirements.txt
           test -f tools/mergewiki/main.py
           test -f tools/mergewiki/render_pr_comment.py
@@ -122,7 +137,7 @@ jobs:
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
 
-      # 9) Upload artifacts
+      # 9) Upload artifacts for debugging
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
