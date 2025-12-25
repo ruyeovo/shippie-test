@@ -24,22 +24,26 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
-          # 避免把凭证持久化到 git 配置里影响后续 git clone
           persist-credentials: false
 
       - name: Fetch PR head
         run: |
           git fetch --no-tags origin ${{ github.event.pull_request.head.sha }}:pr_head
 
-      # 关键修复：用 GITHUB_TOKEN 做 authenticated clone，避免 git 交互式询问 Username
-      - name: Clone MergeWiki tool repo (public, with token)
+      # 关键：public repo 用无鉴权 clone + 禁止交互 + 清掉可能残留的 github extraheader
+      - name: Clone MergeWiki tool repo (public)
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GIT_TERMINAL_PROMPT: "0"
         run: |
           rm -rf tools/mergewiki
           mkdir -p tools
-          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/ruyoevo/MergeWiki.git" tools/mergewiki
+
+          # 防止上一步 checkout 残留 github extraheader 干扰后续 clone
+          git config --global --unset-all http.https://github.com/.extraheader || true
+          git config --global --unset-all credential.helper || true
+
+          # 注意这里必须是 MergeWiki（W 大写）
+          git clone --depth 1 https://github.com/ruyoevo/MergeWiki.git tools/mergewiki
           ls -la tools/mergewiki
 
       - name: Setup Python
