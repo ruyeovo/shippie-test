@@ -28,15 +28,13 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # 2) Fetch PR head 到本地分支 pr_head（用于 merge-base/diff）
+      # 2) Fetch PR head 到本地分支 pr_head
       - name: Fetch PR head
         run: |
           git fetch --no-tags origin ${{ github.event.pull_request.head.sha }}:pr_head
 
-      # 3) 下载工具仓库：GitHub API 查询 default_branch + tarball 下载并解压
-      - name: Download MergeWiki tool repo (via GitHub API tarball)
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # 3) 下载工具仓库（public）：匿名 API 查 default_branch（不带 token）+ codeload tarball 下载
+      - name: Download MergeWiki tool repo (public, no auth)
         run: |
           set -euo pipefail
 
@@ -46,24 +44,50 @@ jobs:
           rm -rf tools/mergewiki
           mkdir -p tools/mergewiki
 
-          echo "Query default branch via GitHub API..."
-          DEFAULT_BRANCH="$(curl -sSfL \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${OWNER}/${REPO}" | jq -r '.default_branch')"
+          # ---- (A) 匿名查询 default_branch（不带 Authorization，避免 GITHUB_TOKEN 跨仓库 404）----
+          echo "Query default branch (anonymous GitHub API)..."
+          API_URL="https://api.github.com/repos/${OWNER}/${REPO}"
 
-          if [ -z "${DEFAULT_BRANCH}" ] || [ "${DEFAULT_BRANCH}" = "null" ]; then
-            echo "ERROR: failed to get default_branch"
-            exit 1
+          http_code="$(curl -sSL -o /tmp/repo.json -w "%{http_code}" "${API_URL}")" || true
+          echo "API status: ${http_code}"
+
+          DEFAULT_BRANCH=""
+          if [ "${http_code}" = "200" ]; then
+            DEFAULT_BRANCH="$(python3 - <<'PY'
+import json
+with open('/tmp/repo.json','r',encoding='utf-8') as f:
+    j=json.load(f)
+print(j.get('default_branch','') or '')
+PY
+)"
           fi
 
-          echo "Default branch: ${DEFAULT_BRANCH}"
-          echo "Downloading tarball via API..."
-          curl -L --fail --retry 3 --retry-delay 2 \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            -o /tmp/mergewiki.tar.gz \
-            "https://api.github.com/repos/${OWNER}/${REPO}/tarball/${DEFAULT_BRANCH}"
+          # fallback：如果 API 不可用/被限流/返回异常，就尝试 main/master
+          if [ -z "${DEFAULT_BRANCH}" ]; then
+            echo "WARN: failed to fetch default_branch via API, fallback to main/master"
+            CANDIDATE_BRANCHES=("main" "master")
+          else
+            echo "Default branch: ${DEFAULT_BRANCH}"
+            CANDIDATE_BRANCHES=("${DEFAULT_BRANCH}" "main" "master")
+          fi
+
+          # ---- (B) 从 codeload 下载 tarball（不走 git clone）----
+          FOUND=0
+          for br in "${CANDIDATE_BRANCHES[@]}"; do
+            url="https://codeload.github.com/${OWNER}/${REPO}/tar.gz/refs/heads/${br}"
+            echo "Trying tarball: ${url}"
+            if curl -L --fail --retry 3 --retry-delay 2 -o /tmp/mergewiki.tar.gz "${url}"; then
+              echo "Downloaded OK from branch: ${br}"
+              FOUND=1
+              break
+            fi
+          done
+
+          if [ "${FOUND}" -ne 1 ]; then
+            echo "ERROR: cannot download tool tarball from any candidate branches."
+            echo "Checked branches: ${CANDIDATE_BRANCHES[*]}"
+            exit 1
+          fi
 
           rm -rf /tmp/mergewiki_src
           mkdir -p /tmp/mergewiki_src
@@ -117,8 +141,6 @@ jobs:
           script: |
             const fs = require('fs');
             const body = fs.readFileSync('comment.md', 'utf8');
-
-            // 必须与你渲染器中的 marker 一致
             const marker = '<!-- llm-merge-resolver -->';
 
             const { owner, repo } = context.repo;
@@ -137,7 +159,7 @@ jobs:
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
 
-      # 9) Upload artifacts for debugging
+      # 9) Upload artifacts
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
