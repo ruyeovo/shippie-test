@@ -1,1 +1,26 @@
+name: Shippie Code Review
 
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  shippie-review:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Shippie Review
+        uses: mattzcarey/shippie@v0.20.0
+        with:
+          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
