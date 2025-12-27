@@ -5,6 +5,17 @@
         synchronized (mGlobalLock) {
             mController = controller;
             mControllerIsAMonkey = imAMonkey;
+            if (controller != null && imAMonkey &&
+                    ("1".equals(SystemProperties.get("persist.sys.audio.premonkeycontrl", "0")))) {
+                SystemProperties.set("sys.audio.monkeycontrl", "1");
+                if (null != mContext) {
+                    AudioManager audioManager = (AudioManager) mContext.getSystemService(Context.AUDIO_SERVICE);
+                    if (null != audioManager) {
+                        audioManager.setParameters("fm_radio_mute=1");
+                        Log.i(TAG, "fm_radio_mute=1");
+                    }
+                }
+            }
 
             if (mControllerIsAMonkey) {
                 mTrueTime = format.format(new Date());
